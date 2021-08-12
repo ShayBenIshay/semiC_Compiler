@@ -1,0 +1,529 @@
+%{
+	#include "hw3_output.hpp"
+	#include <iostream>
+	#include <stdlib.h>
+	#include "source.hpp"
+	
+	#define YYINITDEPTH 5000
+	
+	using namespace std;
+	using namespace output;
+	extern int yylex();
+	extern int yylineno;
+
+	CodeGen code_gen = CodeGen();
+	SymbolTableManager symbol_table_manager = SymbolTableManager();
+	
+	int yyerror(const char * message);
+
+	
+%}
+
+%token VOID
+%token INT
+%token BYTE
+%token B
+%token BOOL
+%token TRUE
+%token FALSE
+%token RETURN
+%token IF
+%token WHILE
+%token BREAK
+%token CONTINUE
+%token SC		
+%token COMMA
+%token ID
+%token NUM
+%token STRING
+%token LBRACE
+%token RBRACE 	
+
+%right ASSIGN
+
+%left OR
+%left AND
+
+%left EQRELOP
+%nonassoc RELOP
+
+%left BINOP
+%left PRIOBINOP
+
+%right NOT
+%right RPAREN
+%right LPAREN
+
+%nonassoc DANG
+%nonassoc ELSE
+
+%%
+
+Program:	{ init(); } Funcs { end_of_program(); };
+
+Funcs:		/*epsilon*/ { }
+			|FuncDecl Funcs { } 
+			;
+
+FuncDecl: 	RetType ID LPAREN Formals RPAREN { 
+
+								insert_function_paramaters( (Id*)$1, (Id*)$2 , (ParamVec*)$4); 
+								symbol_table_manager.symbol_table_stack[1]->func_ret_type = $1->type;
+								//symbol_table_manager.print_stack_variables_and_scopes();
+								emit_function_params((Id*)$1, (Id*)$2 , (ParamVec*)$4);
+								}
+									LBRACE  Statments RBRACE {
+										insert_function_id( (Id*)$2, (Statement*)$8);
+										emit_function_id((Id*)$1, (Id*)$2, (Statement*)$8);
+									}
+											;
+
+RetType:	Type { 
+				//tables.checkLastReturn("EMPTY",yylineno);
+				$$ = $1; 
+			}
+			|VOID { $$ = $1; }
+			;                   
+
+Formals:	/*epsilon*/ {
+					ParamVec* params = new ParamVec();
+					$$ = params;
+			}
+			|FormalsList { $$=$1;}
+			;
+
+FormalsList:	FormalsDecl {
+					ParamVec* params = new ParamVec();
+					params->func_params.push_back((Id*)$1);
+					$$ = params; 
+				}
+				|FormalsDecl COMMA FormalsList {$$ = $3;((ParamVec*)$$)->func_params.push_back((Id*)$1);}	
+				;
+
+FormalsDecl:	Type ID {
+					$$ = $2;
+					$$->type =$1->type;
+					if (symbol_table_manager.id_valid_for_use(((Id*) $2)->name)){ 
+						//ok
+					}else {
+						//error
+						errorDef(yylineno,((Id*) $2)->name);
+						exit(1);
+					}
+					//delete($1);
+				}
+				;
+
+Statments:		Statement {$$=$1;}
+				|Statments M1 Statement {
+					//statements_statement_rule((Statement*)$1,(Statement*)$3);
+					$$ = new Statement();
+					DEBUGGING("Statments M1 Statement")
+					DEBUG("((Statement*)$3)->has_unexpected_break_or_continue",((Statement*)$3)->has_unexpected_break_or_continue)
+					DEBUG("((Statement*)$1)->has_unexpected_break_or_continue",((Statement*)$1)->has_unexpected_break_or_continue)
+
+					((Statement*)$$)->has_return=((Statement*)$3)->has_return || ((Statement*)$1)->has_return;// $1 pointer flags are eddited at statements_statement_rule()
+					if(((Statement*)$3)->has_unexpected_break_or_continue || ((Statement*)$1)->has_unexpected_break_or_continue){
+						//statements code infront of statement code
+						//take the first errline from this statements-statement 
+						
+						((Statement*)$$)->has_unexpected_break_or_continue = true;
+						((Statement*)$$)->errline_br_cn = ((Statement*)$1)->errline_br_cn;
+
+						//assume statements($1) has unexpected
+						((Statement*)$$)->errline_br_cn = ((Statement*)$1)->errline_br_cn;
+						if( !(((Statement*)$1)->has_unexpected_break_or_continue)){
+							//thenstatement flag has_enexpected_br is true
+							((Statement*)$$)->errline_br_cn = ((Statement*)$3)->errline_br_cn;
+						}
+
+					}
+
+					int line = BUFFER.emit("br label @");
+					
+					//STATEMENT's BP
+					BUFFER.bpatch(((Statement*)$1)->next_list,((Id*)$2)->name);
+
+			
+					//update next_list
+					((Statement*)$$)->break_list =BUFFER.merge(((Statement*)$3)->break_list,((Statement*)$1)->break_list);
+					((Statement*)$$)->continue_list = BUFFER.merge(((Id*)$3)->continue_list,((Statement*)$1)->continue_list);
+					((Statement*)$$)->next_list = ((Id*)$3)->next_list;
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));	
+					
+			/*
+					DEBUGGING("Statements ssssssM1ssssss Statement")
+					DEBUGGING("((Statement*)$$)->continue_list")	
+					if(BUFFER.buffer.size()>80) DEBUG("BUFFER.buffer[83]",BUFFER.buffer[83])
+					for(vector<pair<int,BranchLabelIndex>>::const_iterator i = ((Statement*)$$)->continue_list.begin(); i != ((Statement*)$$)->continue_list.end(); i++){
+			    		int address = (*i).first;
+			    		DEBUG("label to patch",address)
+    				}*/					
+				
+				}
+				;
+
+Statement:		LBRACE M Statments RBRACE {
+					$$=$3;
+					int line = BUFFER.emit("br label @");
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));	
+					end_of_scope();symbol_table_manager.pop_scope();
+					//BUFFER.bpatch(((Statement*)$3)->next_list,((Id*)$4)->name);
+				}
+				
+				|Type ID SC {
+					if (symbol_table_manager.id_valid_for_use(((Id*) $2)->name)){ 
+						//add entry
+						symbol_table_manager.insert_id(((Id*) $2)->name,$1->type,nullptr);
+					}else {
+						//error
+						errorDef(yylineno,((Id*) $2)->name);
+						exit(1);
+					}
+
+					string var = code_gen.freshVar();
+					int var_offset = symbol_table_manager.get_entry_by_name(((Id*)$2)->name)->offset;
+					BUFFER.emit(var+" = getelementptr i32, i32* %fp, i32 "+to_string(var_offset));
+					BUFFER.emit("store i32 0, i32* "+var);
+					//double check
+					//update id_node place?
+
+
+					//type id: default statement
+					$$ = new Statement();
+				}
+				|Type ID ASSIGN Exp SC {$$ = statement_type_id_assign((Id*)$1,(Id*)$2,(Id*)$4);}
+				|ID ASSIGN Exp SC {$$ = statement_id_assign((Id*)$1,(Id*)$3);}
+
+				|Call SC {
+						$$ = new Statement(((Id*)$1)->name, ((Id*)$1)->type, ((Id*)$1)->param_vec, ((Id*)$1)->place);
+						((Statement*)$$)->next_list = ((Statement*)$1)->next_list;
+					}	//call
+				|RETURN SC {
+					symbol_table_manager.validate_return_type("EMPTY",yylineno);
+					BUFFER.emit("ret void");
+					$$ = $1;
+				}
+				|RETURN Exp SC {
+					symbol_table_manager.validate_return_type($2->type,yylineno);
+					$$ = $1;
+					Id *id;
+					if( $2->type == "UNDEFINED_TYPE"){
+						id = symbol_table_manager.get_id_by_name(((Id*)$2)->name);
+						$$->type = id->type;
+					}else{
+						//Exp is not id but an value so convert it to id for computability with STATEMENTS rule pointer
+						$$->type = $2->type;
+					}
+					((Id*)$$)->place = ((Id*)$2)->place;
+
+					if($2->type == "BOOL"){
+						code_gen.backpatch_bool((Id*)$2);
+						BUFFER.emit("ret i32 "+((Id*)$2)->place);
+					}else{
+						BUFFER.emit("ret i32 "+((Id*)$$)->place);
+					}
+				}
+				
+				|IF LPAREN Exp RPAREN M M1 Statement %prec DANG {
+					statement_if((Id*)$3,(Statement*)$7);
+					$$ = new Statement();
+					int line = BUFFER.emit("br label @");
+					//string label = BUFFER.genLabel();
+
+
+					//EXP BP
+					BUFFER.bpatch(((Id*)$3)->true_list,((Id*)$6)->name);
+					DEBUGGING("IF LPAREN Exp RPAREN M M1 Statement")
+					if(BUFFER.buffer.size() > 60) DEBUG("BUFFER.buffer[62]",BUFFER.buffer[62])
+					DEBUGGING("((Statement*)$7)->break_list")	
+					for(vector<pair<int,BranchLabelIndex>>::const_iterator i = ((Statement*)$7)->break_list.begin(); i != ((Statement*)$7)->break_list.end(); i++){
+			    		int address = (*i).first;
+			    		DEBUG("label to patch",address)
+    				}					
+						
+					//update next_list
+					((Statement*)$$)->has_unexpected_break_or_continue = ((Statement*)$7)->has_unexpected_break_or_continue;
+					((Statement*)$$)->errline_br_cn = ((Statement*)$7)->errline_br_cn;
+					((Statement*)$$)->has_return = ((Statement*)$7)->has_return;
+					((Statement*)$$)->break_list = ((Statement*)$7)->break_list;
+					((Statement*)$$)->continue_list = ((Statement*)$7)->continue_list;
+					((Statement*)$$)->next_list = BUFFER.merge(((Id*)$3)->false_list, ((Statement*)$7)->next_list);
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));
+				
+				}
+				|IF LPAREN Exp RPAREN M M1 Statement ELSE MN M2_safe_to_change Statement %prec ELSE {
+					 statement_if_else( (Id*)$3, (Statement*)$7, (Statement*)$11);
+					$$ = new Statement();
+					int line = BUFFER.emit("br label @");
+					//string label = BUFFER.genLabel();
+					
+					//EXP BP
+					BUFFER.bpatch( ((Id*)$3)->false_list,((Id*)$10)->name);
+					BUFFER.bpatch( ((Id*)$3)->true_list,((Id*)$6)->name);
+				
+
+					//update $$ flags
+					((Statement*)$$)->has_return=((Statement*)$11)->has_return || ((Statement*)$7)->has_return;// $1 pointer flags are eddited at statements_statement_rule()
+					if(((Statement*)$11)->has_unexpected_break_or_continue || ((Statement*)$7)->has_unexpected_break_or_continue){
+						//statements code infront of statement code
+						//take the first errline from this statements-statement 
+						
+						((Statement*)$$)->has_unexpected_break_or_continue = true;
+						((Statement*)$$)->errline_br_cn = ((Statement*)$7)->errline_br_cn;
+
+						//assume statements($1) has unexpected
+						((Statement*)$$)->errline_br_cn = ((Statement*)$7)->errline_br_cn;
+						if( !(((Statement*)$7)->has_unexpected_break_or_continue)){
+							//thenstatement flag has_enexpected_br is true
+							((Statement*)$$)->errline_br_cn = ((Statement*)$11)->errline_br_cn;
+						}
+
+					}
+					//update next_list
+					((Statement*)$$)->next_list = BUFFER.merge(BUFFER.merge(((Statement*)$7)->next_list,((Id*)$10)->next_list),((Statement*)$11)->next_list);	
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));
+					((Statement*)$$)->break_list = BUFFER.merge(((Statement*)$7)->break_list, ((Statement*)$11)->break_list);
+					((Statement*)$$)->continue_list = BUFFER.merge(((Statement*)$7)->continue_list, ((Statement*)$11)->continue_list);
+
+				}
+				|WHILE M1 LPAREN Exp RPAREN M M1 Statement %prec DANG {
+					statement_while((Id*)$4,(Statement*)$8);
+					int line = BUFFER.emit("br label @");
+					//string label = BUFFER.genLabel();
+
+					//EXP BP
+					BUFFER.bpatch( ((Statement*)$4)->true_list,((Id*)$7)->name);
+					
+					//STATEMENT BP
+					BUFFER.bpatch(((Statement*)$8)->next_list,((Id*)$2)->name);
+					BUFFER.bpatch(((Statement*)$8)->continue_list,((Id*)$2)->name);
+
+					$$ = new Statement();					
+					((Statement*)$$)->has_return=((Statement*)$8)->has_return;
+					
+					//update next_list					
+					((Statement*)$$)->next_list = BUFFER.merge( ((Id*)$4)->false_list, ((Statement*)$8)->break_list);
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));
+			
+				}
+				//     $2         $4          $7   $8                     $11       $12   $13
+				|WHILE M1 LPAREN Exp RPAREN M M1 Statement ELSE MN M2_safe_to_change M1 Statement  {
+					statement_while_else( (Id*)$4, (Statement*)$8, (Statement*)$13);
+					$$ = new Statement();
+					((Statement*)$$)->has_return=((Statement*)$8)->has_return || ((Statement*)$13)->has_return;
+					int line = BUFFER.emit("br label @");
+					//string label = BUFFER.genLabel();
+
+					//STATEMENT1 BP
+					((Statement*)$8)->next_list = BUFFER.merge(((Statement*)$8)->next_list,((Statement*)$8)->continue_list);
+    				BUFFER.bpatch( ((Statement*)$8)->next_list,((Id*)$2)->name);
+					
+					
+					//EXP BP
+					BUFFER.bpatch( ((Id*)$4)->true_list,((Id*)$7)->name);
+					BUFFER.bpatch( ((Id*)$4)->false_list,((Id*)$11)->name);
+					
+				
+				
+					DEBUGGING("WHILE M1 LPAREN Exp RPAREN M M1 Statement ELSE MN M2_safe_to_change");
+					DEBUGGING("((Statement*)$13)->continue_list")
+					for(vector<pair<int,BranchLabelIndex>>::const_iterator i = ((Statement*)$13)->continue_list.begin(); i != ((Statement*)$13)->continue_list.end(); i++){
+			    		int address = (*i).first;
+			    		DEBUG("label to patch",address)
+					}
+					//next_list update
+					((Statement*)$$)->has_unexpected_break_or_continue = ((Statement*)$13)->has_unexpected_break_or_continue;
+					((Statement*)$$)->errline_br_cn = ((Statement*)$13)->errline_br_cn;
+					((Statement*)$$)->has_return=((Statement*)$8)->has_return || ((Statement*)$13)->has_return;
+					((Statement*)$$)->continue_list = ((Statement*)$13)->continue_list;
+					((Statement*)$$)->break_list = ((Statement*)$13)->break_list;
+					((Statement*)$$)->next_list = BUFFER.merge(BUFFER.merge(((Statement*)$8)->break_list ,((Statement*)$13)->next_list),((Id*)$11)->next_list);
+					((Statement*)$$)->next_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));
+					
+				}
+				|BREAK SC {
+					$$ = $1;
+					int line = BUFFER.emit("br label @");
+					((Statement*)$$)->break_list=BUFFER.makelist({line,FIRST});
+				}
+				|CONTINUE SC {
+					$$ = $1;
+					BUFFER.emit(";continue br:");
+					int line = BUFFER.emit("br label @");
+					((Statement*)$$)->continue_list=BUFFER.makelist({line,FIRST});
+				}
+				;
+
+MN:				/*epsilon*/{end_of_scope();symbol_table_manager.pop_scope();symbol_table_manager.push_scope();};
+M:				/*epsilon*/{symbol_table_manager.push_scope();};
+Call:	ID LPAREN ExpList RPAREN {$$ = call_id_explist( (Id*)$1,(ParamVec*)$3);}
+		//change call_id return type to statement
+		//
+		//make sure statement return valid statement(next_list,true_list...)
+		|ID LPAREN RPAREN{$$ = call_id((Id*)$1); }
+		;
+		//build ParamVec from ExpList
+ExpList:	Exp {
+
+				Id* id_to_push=(Id*)$1;
+				if ($1->type=="UNDEFINED_TYPE"){
+					id_to_push->type=(symbol_table_manager.get_id_by_name(((Id*)$1)->name))->type;
+				}
+
+				if (id_to_push->type == "BOOL") code_gen.backpatch_bool(id_to_push);
+				ParamVec* params = new ParamVec();
+				params->func_params.push_back(id_to_push);
+				$$ = params; 
+			}
+
+			//exp comma explist
+			|Exp {
+				Id* id_to_push=(Id*)$1;
+				if(id_to_push->type=="UNDEFINED_TYPE"){
+					id_to_push=symbol_table_manager.get_id_by_name(((Id*)$1)->name);
+				}
+
+				if (id_to_push->type == "BOOL") code_gen.backpatch_bool(id_to_push);
+				$1 = id_to_push;
+				} COMMA ExpList {
+								$$ = $4;
+								Id* id_to_push=(Id*)$1;
+								if ($1->type=="UNDEFINED_TYPE"){
+									id_to_push=symbol_table_manager.get_id_by_name(((Id*)$1)->name);
+								}
+								((ParamVec*)$$)->func_params.push_back(id_to_push);
+								
+			}
+			;
+
+Type:	INT {$$ = $1;}
+		|BYTE {$$ = $1;}
+		|BOOL {$$ = $1;}
+		;
+
+Exp:	LPAREN Exp RPAREN {$$=$2;}
+		|Exp BINOP Exp {$$ = exp_binop_exp((Id*)$1,(Binop*)$2,(Id*)$3);}
+		|Exp PRIOBINOP Exp {$$ = exp_priobinop_exp((Id*)$1,(Binop*)$2,(Id*)$3);}
+		|ID {
+			EntrySymbolTable* entry = symbol_table_manager.get_entry_by_name(((Id*)$1)->name);
+			if (entry == nullptr){
+				//error
+				errorUndef(yylineno,((Id*)$1)->name);
+				exit(1);
+			}	
+		    
+			string var1 = code_gen.freshVar();
+			string var2 = code_gen.freshVar();
+
+			// getting entry. exp_eval eas called from EXP->ID therfore is already initiated.
+			BUFFER.emit(var1+" = getelementptr i32, i32* %fp, i32 "+to_string(entry->offset));
+			BUFFER.emit(var2+" = load i32, i32* "+var1);
+			entry->id_node->place = var2;
+			BUFFER.emit(";EXP->ID: id_node->place:="+entry->id_node->place);
+		    $$ = new Id(entry->id_node->name, entry->id_node->type, entry->id_node->param_vec, entry->id_node->place);
+		    if (((Id*)$$)->type == "BOOL"){
+				string t_var=code_gen.freshVar();
+				BUFFER.emit(";eval compare");
+				BUFFER.emit(t_var+" = icmp ne i32 0, "+var2);
+				int line=BUFFER.emit("br i1 "+t_var+", label @ , label @");
+				//for the case wich exp is BOOL type
+				((Id*)$$)->true_list.push_back(pair<int, BranchLabelIndex>(line, FIRST));
+				((Id*)$$)->false_list.push_back(pair<int, BranchLabelIndex>(line, SECOND));
+			}
+	
+
+			//$$=entry->id_node;    		
+		    //$$=exp_eval((Id*)$$);
+
+		}
+
+		|Call {$$ = (Id*)$1;}
+		|NUM { $$ = $1;}
+		|NUM B {
+			if( stoi(((Id*)$1)->place) > 255){
+				errorByteTooLarge(yylineno,((Id*)$1)->place);
+				exit(1);
+			}
+			$$ = $1;
+			$$->type="BYTE";
+		}
+		|STRING {
+			$$ = $1;
+			((Id*)$$)->name = ((Id*)$$)->place.substr(1,((Id*)$$)->place.length()-2);
+			string str = code_gen.gen_str();
+			string place = ((Id*)$$)->name;
+			string len = to_string(place.length()+1);
+			BUFFER.emitGlobal(str+" = constant ["+len+" x i8] c\""+place+"\\00\"");
+			((Id*)$$)->place = str;
+		}
+		|TRUE {
+			$$ = $1;
+			((Id*)$$)->true_list= BUFFER.makelist({BUFFER.emit("br label @"),FIRST});
+			((Id*)$$)->place = "1";
+		}
+		|FALSE {
+			$$ = $1;
+			((Id*)$$)->false_list= BUFFER.makelist({BUFFER.emit("br label @"),FIRST});
+			((Id*)$$)->place = "0";
+		}
+		|NOT Exp {
+			$$=$1;
+			((Not*)$$)->exp=(Id*)$2;
+			if ($2->type != "BOOL"){
+				//error
+				errorMismatch(yylineno);
+				exit(1);
+			}
+
+    				
+
+			//HW5
+			((Not*)$$)->true_list = ((Id*)$2)->false_list;
+			((Not*)$$)->false_list = ((Id*)$2)->true_list;
+
+		}
+
+		|Exp AND M1_safe_change Exp {
+			//remove deletes from exp_and_exp
+			$$ = exp_and_exp((Id*)$1,(LogicOp*)$2,(Id*)$3,(Id*)$4);
+			
+		}
+		|Exp OR M1_safe_change Exp{$$ = exp_or_exp((Id*)$1,(LogicOp*)$2,(Id*)$3,(Id*)$4);}
+
+		|Exp EQRELOP Exp {$$ = exp_eqrelop_exp((Id*)$1,(Relop*)$2,(Id*)$3);}
+		|Exp RELOP Exp {$$ = exp_relop_exp((Id*)$1,(Relop*)$2,(Id*)$3);}
+		;
+M1_safe_change: {
+	string label = BUFFER.genLabel();
+	$$ = new Id(label);
+};
+M1: {
+	int skip_label = BUFFER.emit("br label @");
+	string label = BUFFER.genLabel();
+	BUFFER.bpatch(BUFFER.makelist({skip_label,FIRST}),label);
+	$$ = new Id(label);
+};
+M2_safe_to_change: {
+
+	int line = BUFFER.emit("br label @");
+	string label = BUFFER.genLabel();
+	Id* id = new Id(label);
+	id->next_list = BUFFER.makelist({line,FIRST});
+	$$ = id;
+};
+
+%%
+
+int main()
+{
+	yyparse();
+}
+
+int yyerror(const char * message)
+{
+	output::errorSyn(yylineno);
+	exit(1);
+	return 0;
+}
+
